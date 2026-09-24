@@ -81,13 +81,6 @@ npm test
 
 ### Demo logins (password: `Password123!`)
 
-| Email | Role | Sees |
-| --- | --- | --- |
-| admin@demo.agency | Admin | Everything |
-| manager@demo.agency | Manager | Zenith Foods only |
-| designer@demo.agency | Team member | Zenith Foods only |
-| freelancer@demo.agency | Freelancer | Only the one task assigned to them |
-| client@zenithfoods.com | Client | Zenith Foods only, no internal notes |
 
 ## Project layout
 
