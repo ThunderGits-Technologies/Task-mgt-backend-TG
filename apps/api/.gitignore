@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+.env.*
+
+# Frontend
+apps/web/
+
+# Uploads
+apps/api/uploads/
+
+# Build output
+dist/
+build/
+.next/
+
+# Logs
+*.log

@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.next/
+*.log
+
+.env
+.env.*
+!.env.example
+
+# Frontend - do not push
+apps/web/
+
+# Shared package build output
+packages/shared/dist/
+
+# Backend uploads
+apps/api/uploads/
+
+.DS_Store
