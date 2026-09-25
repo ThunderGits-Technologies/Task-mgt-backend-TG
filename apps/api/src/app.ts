@@ -14,7 +14,7 @@ import { errorHandler, asyncRoute } from "./middleware/errorHandler";
 
 export function createApp() {
   const app = express();
-
+app.set("trust proxy", 1);
   app.use(
     cors({
       origin: process.env.WEB_ORIGIN ?? "http://localhost:3000",

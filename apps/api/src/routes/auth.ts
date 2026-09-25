@@ -10,10 +10,12 @@ import { authenticate, requireActor } from "../middleware/auth";
 
 export const authRouter = Router();
 
+const isProd = process.env.NODE_ENV === "production";
+
 const cookieOptions = {
   httpOnly: true,
-  sameSite: "lax" as const,
-  secure: process.env.NODE_ENV === "production",
+  sameSite: isProd ? ("none" as const) : ("lax" as const),
+  secure: isProd,
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };
 
