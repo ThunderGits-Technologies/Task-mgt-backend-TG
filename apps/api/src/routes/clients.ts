@@ -78,7 +78,35 @@ clientsRouter.post(
     return res.status(201).json({ client });
   }),
 );
+clientsRouter.delete(
+  "/:clientId",
+  asyncRoute(async (req, res) => {
+    const actor = requireActor(req);
+    if (actor.role !== "admin") {
+      return res.status(403).json({ error: "Only admins can delete clients" });
+    }
 
+    const [client] = await db
+      .select()
+      .from(clients)
+      .where(and(eq(clients.id, req.params.clientId), eq(clients.workspaceId, actor.workspaceId)))
+      .limit(1);
+    if (!client) throw new NotFoundError("Client not found");
+
+    await db.transaction(async (tx) => {
+      await tx.update(clients).set({ archived: true }).where(eq(clients.id, client.id));
+      await tx.insert(auditLogs).values({
+        workspaceId: actor.workspaceId,
+        actorId: actor.userId,
+        action: "client.archived",
+        targetType: "client",
+        targetId: client.id,
+      });
+    });
+
+    return res.json({ ok: true });
+  }),
+);
 clientsRouter.get(
   "/:clientId",
   asyncRoute(async (req, res) => {

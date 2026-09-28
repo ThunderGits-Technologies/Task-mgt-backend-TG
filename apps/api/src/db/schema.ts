@@ -380,7 +380,7 @@ import {
   uniqueIndex,
   index,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql  } from "drizzle-orm";
 
 export const roleEnum = pgEnum("role", ["admin", "manager", "team_member", "freelancer", "client"]);
 export const membershipStatusEnum = pgEnum("membership_status", ["active", "invited", "suspended"]);
@@ -449,7 +449,14 @@ export const clients = pgTable(
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
-  (t) => ({ workspaceIdx: index("clients_workspace_idx").on(t.workspaceId) }),
+  (t) => ({
+    workspaceIdx: index("clients_workspace_idx").on(t.workspaceId),
+    // No two active clients in a workspace can share a name (case-insensitive).
+    // Archived clients are ignored, so a deleted client's name can be reused.
+    uniqueActiveName: uniqueIndex("clients_workspace_name_unique_idx")
+      .on(t.workspaceId, sql`lower(${t.name})`)
+      .where(sql`${t.archived} = false`),
+  }),
 );
 
 export const clientAssignments = pgTable(
