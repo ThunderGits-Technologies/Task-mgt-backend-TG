@@ -18,6 +18,29 @@ const NONE_ID = "00000000-0000-0000-0000-000000000000";
  * calendar; omitted, it returns the combined multi-client view (CAL-01),
  * already filtered down to clients this actor may see.
  */
+contentItemsRouter.delete(
+  "/:id",
+  asyncRoute(async (req, res) => {
+    const actor = requireActor(req);
+    const [item] = await db
+      .select()
+      .from(contentItems)
+      .where(and(eq(contentItems.id, req.params.id), eq(contentItems.workspaceId, actor.workspaceId)))
+      .limit(1);
+    if (!item) throw new NotFoundError("Content item not found");
+
+    // Same permission rule as editing
+    if (!(actor.role === "admin" || ((actor.role === "manager" || actor.role === "team_member") && actor.assignedClientIds.has(item.clientId)))) {
+      return res.status(403).json({ error: "You cannot delete this content item" });
+    }
+
+    await db.delete(contentItems).where(eq(contentItems.id, item.id));
+    return res.json({ ok: true });
+  }),
+);
+
+
+
 contentItemsRouter.get(
   "/",
   asyncRoute(async (req, res) => {
@@ -114,6 +137,7 @@ contentItemsRouter.get(
 
 const updateContentItemSchema = z.object({
   title: z.string().min(2).max(200).optional(),
+  channel: z.enum(CHANNELS).optional(),   // <-- add this line
   format: z.string().min(1).max(60).optional(),
   publishDate: z.coerce.date().optional(),
   status: z.enum(["planned", "in_production", "ready", "scheduled", "published"]).optional(),
