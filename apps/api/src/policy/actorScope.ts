@@ -1,7 +1,7 @@
-import { eq, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { Role } from "@agency/shared";
 import { db } from "../db/client";
-import { clientAssignments, clientContacts, deliverableAssignees, deliverables, contentItems } from "../db/schema";
+import { clientAssignments, clientContacts, deliverableAssignees } from "../db/schema";
 
 /**
  * Everything the policy layer needs to know about the calling user, loaded
@@ -29,32 +29,12 @@ export async function loadActorScope(userId: string, workspaceId: string, role: 
     db.select({ deliverableId: deliverableAssignees.deliverableId }).from(deliverableAssignees).where(eq(deliverableAssignees.userId, userId)),
   ]);
 
-  const assignedClientIds = new Set(assignments.map((a) => a.clientId));
-  const assignedDeliverableIds = new Set(deliverableAssignmentRows.map((d) => d.deliverableId));
-
-  // A manager/team_member should also count as "assigned" to a client if
-  // they're personally assigned to any task for that client, even without a
-  // formal client_assignments row (e.g. a one-off task handed to them).
-  if ((role === "manager" || role === "team_member") && assignedDeliverableIds.size > 0) {
-    const deliverableIds = Array.from(assignedDeliverableIds);
-    const rows = await db
-      .select({ clientId: deliverables.clientId, contentItemClientId: contentItems.clientId })
-      .from(deliverables)
-      .leftJoin(contentItems, eq(deliverables.contentItemId, contentItems.id))
-      .where(inArray(deliverables.id, deliverableIds));
-
-    for (const r of rows) {
-      const clientId = r.clientId ?? r.contentItemClientId;
-      if (clientId) assignedClientIds.add(clientId);
-    }
-  }
-
   return {
     userId,
     workspaceId,
     role,
-    assignedClientIds,
+    assignedClientIds: new Set(assignments.map((a) => a.clientId)),
     ownClientId: clientContactRows[0]?.clientId ?? null,
-    assignedDeliverableIds,
+    assignedDeliverableIds: new Set(deliverableAssignmentRows.map((d) => d.deliverableId)),
   };
 }
