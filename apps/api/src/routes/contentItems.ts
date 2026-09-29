@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { and, eq, gte, inArray, lte } from "drizzle-orm";
 import { db } from "../db/client";
-import { contentItems } from "../db/schema";
+import { contentItems, deliverables, deliverableAssignees } from "../db/schema";
 import { authenticate, requireActor } from "../middleware/auth";
 import { asyncRoute, NotFoundError } from "../middleware/errorHandler";
 import { policy } from "../policy/policy";
@@ -16,31 +16,10 @@ const NONE_ID = "00000000-0000-0000-0000-000000000000";
 /**
  * The monthly/combined calendar feed. `clientId` narrows to one client's
  * calendar; omitted, it returns the combined multi-client view (CAL-01),
- * already filtered down to clients this actor may see.
+ * already filtered down to clients this actor may see. Staff/freelancers
+ * with strict task-level isolation only see clients tied to their own
+ * assigned deliverables, never a coworker's clients.
  */
-contentItemsRouter.delete(
-  "/:id",
-  asyncRoute(async (req, res) => {
-    const actor = requireActor(req);
-    const [item] = await db
-      .select()
-      .from(contentItems)
-      .where(and(eq(contentItems.id, req.params.id), eq(contentItems.workspaceId, actor.workspaceId)))
-      .limit(1);
-    if (!item) throw new NotFoundError("Content item not found");
-
-    // Same permission rule as editing
-    if (!(actor.role === "admin" || ((actor.role === "manager" || actor.role === "team_member") && actor.assignedClientIds.has(item.clientId)))) {
-      return res.status(403).json({ error: "You cannot delete this content item" });
-    }
-
-    await db.delete(contentItems).where(eq(contentItems.id, item.id));
-    return res.json({ ok: true });
-  }),
-);
-
-
-
 contentItemsRouter.get(
   "/",
   asyncRoute(async (req, res) => {
@@ -57,8 +36,26 @@ contentItemsRouter.get(
       conditions.push(eq(contentItems.clientId, clientId));
     } else if (actor.role === "admin") {
       // no extra filter
-    } else if (actor.role === "manager" || actor.role === "team_member") {
+    } else if (actor.role === "manager") {
       const ids = Array.from(actor.assignedClientIds);
+      conditions.push(inArray(contentItems.clientId, ids.length > 0 ? ids : [NONE_ID]));
+    } else if (actor.role === "team_member") {
+      // Strict isolation: only clients tied to this person's own assigned
+      // deliverables, not every client their team works with.
+      const assignedRows = await db
+        .select({ deliverableId: deliverableAssignees.deliverableId })
+        .from(deliverableAssignees)
+        .where(eq(deliverableAssignees.userId, actor.userId));
+      const deliverableIds = assignedRows.map((r) => r.deliverableId);
+      const idSet = new Set<string>();
+      if (deliverableIds.length > 0) {
+        const rows = await db
+          .select({ clientId: deliverables.clientId })
+          .from(deliverables)
+          .where(inArray(deliverables.id, deliverableIds));
+        for (const r of rows) if (r.clientId) idSet.add(r.clientId);
+      }
+      const ids = Array.from(idSet);
       conditions.push(inArray(contentItems.clientId, ids.length > 0 ? ids : [NONE_ID]));
     } else if (actor.role === "client") {
       conditions.push(eq(contentItems.clientId, actor.ownClientId ?? NONE_ID));
@@ -137,7 +134,7 @@ contentItemsRouter.get(
 
 const updateContentItemSchema = z.object({
   title: z.string().min(2).max(200).optional(),
-  channel: z.enum(CHANNELS).optional(),   // <-- add this line
+  channel: z.enum(CHANNELS).optional(),
   format: z.string().min(1).max(60).optional(),
   publishDate: z.coerce.date().optional(),
   status: z.enum(["planned", "in_production", "ready", "scheduled", "published"]).optional(),
@@ -160,5 +157,26 @@ contentItemsRouter.patch(
     const body = updateContentItemSchema.parse(req.body);
     const [updated] = await db.update(contentItems).set(body).where(eq(contentItems.id, item.id)).returning();
     return res.json({ contentItem: updated });
+  }),
+);
+
+contentItemsRouter.delete(
+  "/:id",
+  asyncRoute(async (req, res) => {
+    const actor = requireActor(req);
+    const [item] = await db
+      .select()
+      .from(contentItems)
+      .where(and(eq(contentItems.id, req.params.id), eq(contentItems.workspaceId, actor.workspaceId)))
+      .limit(1);
+    if (!item) throw new NotFoundError("Content item not found");
+
+    // Same permission rule as editing
+    if (!(actor.role === "admin" || ((actor.role === "manager" || actor.role === "team_member") && actor.assignedClientIds.has(item.clientId)))) {
+      return res.status(403).json({ error: "You cannot delete this content item" });
+    }
+
+    await db.delete(contentItems).where(eq(contentItems.id, item.id));
+    return res.json({ ok: true });
   }),
 );

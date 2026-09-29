@@ -521,54 +521,45 @@ async function assertClientInWorkspace(clientId: string, workspaceId: string) {
 
 /** Deliverable ids visible to this actor by client scope (staff/client roles). Null = "no extra filter (admin)". */
 /** Deliverable ids visible to this actor by client scope (staff/client roles). Null = "no extra filter (admin)". */
+/** Deliverable ids visible to this actor by client scope (staff/client roles). Null = "no extra filter (admin)". */
 async function visibleDeliverableIdsByClient(actor: ActorScope): Promise<string[] | null> {
   if (actor.role === "admin") return null;
 
-  let clientIds: string[];
-  if (actor.role === "manager" || actor.role === "team_member") {
-    clientIds = Array.from(actor.assignedClientIds);
-  } else if (actor.role === "client") {
-    clientIds = actor.ownClientId ? [actor.ownClientId] : [];
-  } else {
-    return []; // freelancer path handled by direct assignment filter, not here
-  }
-
-  const items =
-    clientIds.length > 0
-      ? await db.select({ id: contentItems.id }).from(contentItems).where(inArray(contentItems.clientId, clientIds))
-      : [];
-  const contentItemIds = items.map((i) => i.id);
-
-  // Visible either by a direct client link, or via the client of a linked content item (older tasks).
-  const clientScopedIds =
-    clientIds.length === 0 && contentItemIds.length === 0
-      ? []
-      : (
-          await db
-            .select({ id: deliverables.id })
-            .from(deliverables)
-            .where(
-              or(
-                clientIds.length > 0 ? inArray(deliverables.clientId, clientIds) : undefined,
-                contentItemIds.length > 0 ? inArray(deliverables.contentItemId, contentItemIds) : undefined,
-              ),
-            )
-        ).map((r) => r.id);
-
-  // Managers and team members can also see tasks they're personally assigned
-  // to, even for clients they aren't otherwise assigned to (e.g. Sneha added
-  // as an assignee on a one-off task for a client she doesn't manage).
-  let assignedIds: string[] = [];
-  if (actor.role === "manager" || actor.role === "team_member") {
+  if (actor.role === "team_member" || actor.role === "freelancer") {
+    // Strict isolation: see only tasks personally assigned to you, never a
+    // teammate's task on the same client.
     const rows = await db
       .select({ id: deliverableAssignees.deliverableId })
       .from(deliverableAssignees)
       .where(eq(deliverableAssignees.userId, actor.userId));
-    assignedIds = rows.map((r) => r.id);
+    return rows.map((r) => r.id);
   }
 
-  return Array.from(new Set([...clientScopedIds, ...assignedIds]));
+  let clientIds: string[];
+  if (actor.role === "manager") {
+    clientIds = Array.from(actor.assignedClientIds);
+  } else if (actor.role === "client") {
+    clientIds = actor.ownClientId ? [actor.ownClientId] : [];
+  } else {
+    return [];
+  }
+  if (clientIds.length === 0) return [];
+
+  const items = await db.select({ id: contentItems.id }).from(contentItems).where(inArray(contentItems.clientId, clientIds));
+  const contentItemIds = items.map((i) => i.id);
+
+  const rows = await db
+    .select({ id: deliverables.id })
+    .from(deliverables)
+    .where(
+      or(
+        inArray(deliverables.clientId, clientIds),
+        contentItemIds.length > 0 ? inArray(deliverables.contentItemId, contentItemIds) : undefined,
+      ),
+    );
+  return rows.map((r) => r.id);
 }
+
 deliverablesRouter.get(
   "/",
   asyncRoute(async (req, res) => {

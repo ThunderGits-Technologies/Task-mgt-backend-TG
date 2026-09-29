@@ -22,50 +22,36 @@ async function scopedDeliverableIds(actor: ActorScope, clientId?: string): Promi
     const rows = await db
       .select({ id: deliverables.id })
       .from(deliverables)
-      .where(
-        or(
-          eq(deliverables.clientId, clientId),
-          ids.length > 0 ? inArray(deliverables.contentItemId, ids) : undefined,
-        ),
-      );
-    return rows.map((r) => r.id);
+      .where(or(eq(deliverables.clientId, clientId), ids.length > 0 ? inArray(deliverables.contentItemId, ids) : undefined));
+    let scoped = rows.map((r) => r.id);
+
+    // Even when scoped to a specific client, team_member/freelancer still
+    // only see their own tasks within it.
+    if (actor.role === "team_member" || actor.role === "freelancer") {
+      const own = await db.select({ id: deliverableAssignees.deliverableId }).from(deliverableAssignees).where(eq(deliverableAssignees.userId, actor.userId));
+      const ownSet = new Set(own.map((r) => r.id));
+      scoped = scoped.filter((id) => ownSet.has(id));
+    }
+    return scoped;
   }
 
-  if (actor.role === "admin") return null; // no filter
+  if (actor.role === "admin") return null;
 
-  if (actor.role === "manager" || actor.role === "team_member") {
+  if (actor.role === "team_member" || actor.role === "freelancer") {
+    const rows = await db.select({ deliverableId: deliverableAssignees.deliverableId }).from(deliverableAssignees).where(eq(deliverableAssignees.userId, actor.userId));
+    return rows.map((r) => r.deliverableId);
+  }
+
+  if (actor.role === "manager") {
     const clientIds = Array.from(actor.assignedClientIds);
-
-    const items =
-      clientIds.length > 0
-        ? await db.select({ id: contentItems.id }).from(contentItems).where(inArray(contentItems.clientId, clientIds))
-        : [];
-    const contentItemIds = items.map((i) => i.id);
-
-    const clientScopedIds =
-      clientIds.length === 0 && contentItemIds.length === 0
-        ? []
-        : (
-            await db
-              .select({ id: deliverables.id })
-              .from(deliverables)
-              .where(
-                or(
-                  clientIds.length > 0 ? inArray(deliverables.clientId, clientIds) : undefined,
-                  contentItemIds.length > 0 ? inArray(deliverables.contentItemId, contentItemIds) : undefined,
-                ),
-              )
-          ).map((r) => r.id);
-
-    // Also include deliverables this actor is personally assigned to, even
-    // for clients they aren't otherwise assigned to.
-    const assigneeRows = await db
-      .select({ id: deliverableAssignees.deliverableId })
-      .from(deliverableAssignees)
-      .where(eq(deliverableAssignees.userId, actor.userId));
-    const assignedIds = assigneeRows.map((r) => r.id);
-
-    return Array.from(new Set([...clientScopedIds, ...assignedIds]));
+    if (clientIds.length === 0) return [];
+    const items = await db.select({ id: contentItems.id }).from(contentItems).where(inArray(contentItems.clientId, clientIds));
+    const ids = items.map((i) => i.id);
+    const rows = await db
+      .select({ id: deliverables.id })
+      .from(deliverables)
+      .where(or(inArray(deliverables.clientId, clientIds), ids.length > 0 ? inArray(deliverables.contentItemId, ids) : undefined));
+    return rows.map((r) => r.id);
   }
 
   if (actor.role === "client") {
@@ -75,18 +61,11 @@ async function scopedDeliverableIds(actor: ActorScope, clientId?: string): Promi
     const rows = await db
       .select({ id: deliverables.id })
       .from(deliverables)
-      .where(
-        or(
-          eq(deliverables.clientId, actor.ownClientId),
-          ids.length > 0 ? inArray(deliverables.contentItemId, ids) : undefined,
-        ),
-      );
+      .where(or(eq(deliverables.clientId, actor.ownClientId), ids.length > 0 ? inArray(deliverables.contentItemId, ids) : undefined));
     return rows.map((r) => r.id);
   }
 
-  // freelancer: only their own assignments
-  const rows = await db.select({ deliverableId: deliverableAssignees.deliverableId }).from(deliverableAssignees).where(eq(deliverableAssignees.userId, actor.userId));
-  return rows.map((r) => r.deliverableId);
+  return [];
 }
 
 /** RPT-01: deliverables per client by stage. */

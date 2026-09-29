@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../db/client";
-import { clients, clientAssignments, users, auditLogs } from "../db/schema";
+import {deliverables, deliverableAssignees, clients, clientAssignments, users, auditLogs } from "../db/schema";
 import { authenticate, requireActor } from "../middleware/auth";
 import { asyncRoute, NotFoundError } from "../middleware/errorHandler";
 import { policy } from "../policy/policy";
@@ -17,24 +17,38 @@ clientsRouter.get(
     const actor = requireActor(req);
 
     if (actor.role === "freelancer") {
-      // Freelancers have no general client list — only assigned deliverables.
       return res.json({ clients: [] });
     }
 
     const conditions = [eq(clients.workspaceId, actor.workspaceId), eq(clients.archived, false)];
-    if (actor.role === "manager" || actor.role === "team_member") {
+
+    if (actor.role === "manager") {
       const ids = Array.from(actor.assignedClientIds);
+      conditions.push(inArray(clients.id, ids.length > 0 ? ids : ["00000000-0000-0000-0000-000000000000"]));
+    } else if (actor.role === "team_member") {
+      // Strict isolation: only clients whose tasks this person is personally
+      // assigned to — for the client dropdown/filter, not full client access.
+      const assignedRows = await db
+        .select({ deliverableId: deliverableAssignees.deliverableId })
+        .from(deliverableAssignees)
+        .where(eq(deliverableAssignees.userId, actor.userId));
+      const deliverableIds = assignedRows.map((r) => r.deliverableId);
+
+      const idSet = new Set<string>();
+      if (deliverableIds.length > 0) {
+        const rows = await db
+          .select({ clientId: deliverables.clientId })
+          .from(deliverables)
+          .where(inArray(deliverables.id, deliverableIds));
+        for (const r of rows) if (r.clientId) idSet.add(r.clientId);
+      }
+      const ids = Array.from(idSet);
       conditions.push(inArray(clients.id, ids.length > 0 ? ids : ["00000000-0000-0000-0000-000000000000"]));
     } else if (actor.role === "client") {
       conditions.push(eq(clients.id, actor.ownClientId ?? "00000000-0000-0000-0000-000000000000"));
     }
-    // admin: no extra filter, sees everything in the workspace
 
-    const rows = await db
-      .select()
-      .from(clients)
-      .where(and(...conditions))
-      .orderBy(clients.name);
+    const rows = await db.select().from(clients).where(and(...conditions)).orderBy(clients.name);
     return res.json({ clients: rows });
   }),
 );
