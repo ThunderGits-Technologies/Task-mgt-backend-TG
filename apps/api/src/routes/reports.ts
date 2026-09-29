@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, eq, gte, inArray, lt, lte } from "drizzle-orm";
+import { and, eq, gte, inArray, lt, lte ,or} from "drizzle-orm";
 import { db } from "../db/client";
 import { deliverables, deliverableAssignees, contentItems, clients, stages, stageTransitions } from "../db/schema";
 import { authenticate, requireActor } from "../middleware/auth";
@@ -13,13 +13,21 @@ reportsRouter.use(authenticate);
 const NONE_ID = "00000000-0000-0000-0000-000000000000";
 
 /** Resolves the deliverable ids visible to this actor, honoring client scoping. */
+/** Resolves the deliverable ids visible to this actor, honoring client scoping. */
 async function scopedDeliverableIds(actor: ActorScope, clientId?: string): Promise<string[] | null> {
   if (clientId) {
     policy.assertCanViewClient(actor, clientId);
     const items = await db.select({ id: contentItems.id }).from(contentItems).where(eq(contentItems.clientId, clientId));
     const ids = items.map((i) => i.id);
-    if (ids.length === 0) return [];
-    const rows = await db.select({ id: deliverables.id }).from(deliverables).where(inArray(deliverables.contentItemId, ids));
+    const rows = await db
+      .select({ id: deliverables.id })
+      .from(deliverables)
+      .where(
+        or(
+          eq(deliverables.clientId, clientId),
+          ids.length > 0 ? inArray(deliverables.contentItemId, ids) : undefined,
+        ),
+      );
     return rows.map((r) => r.id);
   }
 
@@ -27,20 +35,52 @@ async function scopedDeliverableIds(actor: ActorScope, clientId?: string): Promi
 
   if (actor.role === "manager" || actor.role === "team_member") {
     const clientIds = Array.from(actor.assignedClientIds);
-    if (clientIds.length === 0) return [];
-    const items = await db.select({ id: contentItems.id }).from(contentItems).where(inArray(contentItems.clientId, clientIds));
-    const ids = items.map((i) => i.id);
-    if (ids.length === 0) return [];
-    const rows = await db.select({ id: deliverables.id }).from(deliverables).where(inArray(deliverables.contentItemId, ids));
-    return rows.map((r) => r.id);
+
+    const items =
+      clientIds.length > 0
+        ? await db.select({ id: contentItems.id }).from(contentItems).where(inArray(contentItems.clientId, clientIds))
+        : [];
+    const contentItemIds = items.map((i) => i.id);
+
+    const clientScopedIds =
+      clientIds.length === 0 && contentItemIds.length === 0
+        ? []
+        : (
+            await db
+              .select({ id: deliverables.id })
+              .from(deliverables)
+              .where(
+                or(
+                  clientIds.length > 0 ? inArray(deliverables.clientId, clientIds) : undefined,
+                  contentItemIds.length > 0 ? inArray(deliverables.contentItemId, contentItemIds) : undefined,
+                ),
+              )
+          ).map((r) => r.id);
+
+    // Also include deliverables this actor is personally assigned to, even
+    // for clients they aren't otherwise assigned to.
+    const assigneeRows = await db
+      .select({ id: deliverableAssignees.deliverableId })
+      .from(deliverableAssignees)
+      .where(eq(deliverableAssignees.userId, actor.userId));
+    const assignedIds = assigneeRows.map((r) => r.id);
+
+    return Array.from(new Set([...clientScopedIds, ...assignedIds]));
   }
 
   if (actor.role === "client") {
     if (!actor.ownClientId) return [];
     const items = await db.select({ id: contentItems.id }).from(contentItems).where(eq(contentItems.clientId, actor.ownClientId));
     const ids = items.map((i) => i.id);
-    if (ids.length === 0) return [];
-    const rows = await db.select({ id: deliverables.id }).from(deliverables).where(inArray(deliverables.contentItemId, ids));
+    const rows = await db
+      .select({ id: deliverables.id })
+      .from(deliverables)
+      .where(
+        or(
+          eq(deliverables.clientId, actor.ownClientId),
+          ids.length > 0 ? inArray(deliverables.contentItemId, ids) : undefined,
+        ),
+      );
     return rows.map((r) => r.id);
   }
 
