@@ -451,7 +451,7 @@
 
 import { Router } from "express";
 import { z } from "zod";
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, or } from "drizzle-orm";
 import { db } from "../db/client";
 import {
   deliverables,
@@ -461,11 +461,13 @@ import {
   stages,
   stageTransitions,
   checklistItems,
+  checklists,
+  lists,
   comments,
 } from "../db/schema";
 import { authenticate, requireActor } from "../middleware/auth";
 import { asyncRoute, NotFoundError } from "../middleware/errorHandler";
-import { policy } from "../policy/policy";
+import { policy, ForbiddenError } from "../policy/policy";
 import type { ActorScope } from "../policy/actorScope";
 
 export const deliverablesRouter = Router();
@@ -543,9 +545,11 @@ async function visibleDeliverableIdsByClient(actor: ActorScope): Promise<string[
   } else {
     return [];
   }
-  if (clientIds.length === 0) return [];
+  if (clientIds.length === 0 && actor.role !== "manager") return [];
 
-  const items = await db.select({ id: contentItems.id }).from(contentItems).where(inArray(contentItems.clientId, clientIds));
+  const items = clientIds.length > 0
+    ? await db.select({ id: contentItems.id }).from(contentItems).where(inArray(contentItems.clientId, clientIds))
+    : [];
   const contentItemIds = items.map((i) => i.id);
 
   const rows = await db
@@ -553,8 +557,10 @@ async function visibleDeliverableIdsByClient(actor: ActorScope): Promise<string[
     .from(deliverables)
     .where(
       or(
-        inArray(deliverables.clientId, clientIds),
+        clientIds.length > 0 ? inArray(deliverables.clientId, clientIds) : undefined,
         contentItemIds.length > 0 ? inArray(deliverables.contentItemId, contentItemIds) : undefined,
+        // Tasks filed in a List belong to the internal hierarchy: managers see them all.
+        actor.role === "manager" ? isNotNull(deliverables.listId) : undefined,
       ),
     );
   return rows.map((r) => r.id);
@@ -564,10 +570,22 @@ deliverablesRouter.get(
   "/",
   asyncRoute(async (req, res) => {
     const actor = requireActor(req);
-    const { stageId, assigneeId, clientId } = req.query as Record<string, string | undefined>;
+    const { stageId, assigneeId, clientId, listId, folderId, spaceId } = req.query as Record<string, string | undefined>;
 
     const conditions = [eq(deliverables.workspaceId, actor.workspaceId)];
     if (stageId) conditions.push(eq(deliverables.stageId, stageId));
+
+    // Hierarchy filters: a List, every List in a Folder, or every List in a Space.
+    if (listId) {
+      conditions.push(eq(deliverables.listId, listId));
+    } else if (folderId || spaceId) {
+      const scope = await db
+        .select({ id: lists.id })
+        .from(lists)
+        .where(and(eq(lists.workspaceId, actor.workspaceId), folderId ? eq(lists.folderId, folderId) : eq(lists.spaceId, spaceId!)));
+      const ids = scope.map((l) => l.id);
+      conditions.push(inArray(deliverables.listId, ids.length > 0 ? ids : [NONE_ID]));
+    }
 
     if (clientId) {
       policy.assertCanViewClient(actor, clientId);
@@ -608,6 +626,7 @@ deliverablesRouter.get(
         assignees: { with: { user: { columns: { id: true, name: true } } } },
         contentItem: { columns: { id: true, title: true, clientId: true } },
         client: { columns: { id: true, name: true } },
+        list: { columns: { id: true, name: true, spaceId: true, folderId: true } },
       },
       orderBy: (t, { asc: ascOp }) => [ascOp(t.dueDate)],
     });
@@ -628,6 +647,7 @@ const createDeliverableSchema = z.object({
   assigneeIds: z.array(z.string().uuid()).default([]),
   parentId: z.string().uuid().optional(),
   blockedById: z.string().uuid().optional(),
+  listId: z.string().uuid().optional(),
 });
 
 deliverablesRouter.post(
@@ -637,6 +657,29 @@ deliverablesRouter.post(
     const body = createDeliverableSchema.parse(req.body);
 
     let resolvedClientId: string | undefined = body.clientId;
+    let resolvedListId: string | undefined = body.listId;
+
+    // Subtasks (to any depth): must hang off a task in this workspace and inherit its List / client.
+    if (body.parentId) {
+      const [parent] = await db
+        .select()
+        .from(deliverables)
+        .where(and(eq(deliverables.id, body.parentId), eq(deliverables.workspaceId, actor.workspaceId)))
+        .limit(1);
+      if (!parent) throw new NotFoundError("Parent task not found");
+      await assertCanEditById(actor, parent.id);
+      resolvedListId = parent.listId ?? undefined;
+      resolvedClientId = body.clientId ?? parent.clientId ?? undefined;
+    }
+
+    if (resolvedListId) {
+      const [list] = await db
+        .select({ id: lists.id })
+        .from(lists)
+        .where(and(eq(lists.id, resolvedListId), eq(lists.workspaceId, actor.workspaceId)))
+        .limit(1);
+      if (!list) throw new NotFoundError("List not found");
+    }
 
     if (body.contentItemId) {
       const [contentItem] = await db
@@ -675,6 +718,7 @@ deliverablesRouter.post(
           workspaceId: actor.workspaceId,
           contentItemId: body.contentItemId,
           clientId: resolvedClientId,
+          listId: resolvedListId,
           title: body.title,
           description: body.description,
           dueDate: body.dueDate,
@@ -686,8 +730,13 @@ deliverablesRouter.post(
         })
         .returning();
 
-      if (body.assigneeIds.length > 0) {
-        await tx.insert(deliverableAssignees).values(body.assigneeIds.map((userId) => ({ deliverableId: created.id, userId })));
+      // Team members only see tasks assigned to them, so a task they create must include them.
+      const assigneeIds =
+        actor.role === "team_member" && !body.assigneeIds.includes(actor.userId)
+          ? [...body.assigneeIds, actor.userId]
+          : body.assigneeIds;
+      if (assigneeIds.length > 0) {
+        await tx.insert(deliverableAssignees).values(assigneeIds.map((userId) => ({ deliverableId: created.id, userId })));
       }
 
       await tx.insert(stageTransitions).values({ deliverableId: created.id, toStageId: created.stageId, changedById: actor.userId });
@@ -724,7 +773,57 @@ deliverablesRouter.get(
       policy.assertCanViewDeliverable(actor, { clientId, deliverableId: deliverable.id });
     }
 
-    return res.json({ deliverable });
+    const [checklistRows, itemRows, subtasks, list] = await Promise.all([
+      db.select().from(checklists).where(eq(checklists.deliverableId, deliverable.id)).orderBy(asc(checklists.order), asc(checklists.createdAt)),
+      db.select().from(checklistItems).where(eq(checklistItems.deliverableId, deliverable.id)).orderBy(asc(checklistItems.order)),
+      db.query.deliverables.findMany({
+        where: and(eq(deliverables.parentId, deliverable.id), eq(deliverables.workspaceId, actor.workspaceId)),
+        with: {
+          stage: true,
+          assignees: { with: { user: { columns: { id: true, name: true } } } },
+        },
+        orderBy: (t, { asc: ascOp }) => [ascOp(t.createdAt)],
+      }),
+      deliverable.listId
+        ? db.query.lists.findFirst({
+            where: eq(lists.id, deliverable.listId),
+            with: {
+              space: { columns: { id: true, name: true } },
+              folder: { columns: { id: true, name: true } },
+            },
+          })
+        : Promise.resolve(null),
+    ]);
+
+    // Walk up parentId to build the breadcrumb (guarded against accidental cycles).
+    const ancestors: { id: string; title: string }[] = [];
+    let cursor = deliverable.parentId;
+    for (let depth = 0; cursor && depth < 20; depth++) {
+      const [parent] = await db
+        .select({ id: deliverables.id, title: deliverables.title, parentId: deliverables.parentId })
+        .from(deliverables)
+        .where(and(eq(deliverables.id, cursor), eq(deliverables.workspaceId, actor.workspaceId)))
+        .limit(1);
+      if (!parent) break;
+      ancestors.unshift({ id: parent.id, title: parent.title });
+      cursor = parent.parentId;
+    }
+
+    return res.json({
+      deliverable: {
+        ...deliverable,
+        list: list ?? null,
+        subtasks,
+        ancestors,
+        // Named checklists, each with its items. Legacy ungrouped items are returned as one "Checklist".
+        checklists: [
+          ...checklistRows.map((c) => ({ id: c.id, name: c.name, items: itemRows.filter((i) => i.checklistId === c.id) })),
+          ...(itemRows.some((i) => !i.checklistId)
+            ? [{ id: null, name: "Checklist", items: itemRows.filter((i) => !i.checklistId) }]
+            : []),
+        ],
+      },
+    });
   }),
 );
 
@@ -735,6 +834,7 @@ const updateDeliverableSchema = z.object({
   priority: z.enum(["low", "medium", "high", "urgent"]).optional(),
   stageId: z.string().uuid().optional(),
   clientId: z.string().uuid().nullable().optional(),
+  listId: z.string().uuid().nullable().optional(),
 });
 
 deliverablesRouter.patch(
@@ -769,6 +869,15 @@ deliverablesRouter.patch(
       }
     }
 
+    if (body.listId) {
+      const [list] = await db
+        .select({ id: lists.id })
+        .from(lists)
+        .where(and(eq(lists.id, body.listId), eq(lists.workspaceId, actor.workspaceId)))
+        .limit(1);
+      if (!list) throw new NotFoundError("List not found");
+    }
+
     if (body.stageId && body.stageId !== existing.stageId) {
       const [nextStage] = await db
         .select()
@@ -788,6 +897,20 @@ deliverablesRouter.patch(
 
     const updated = await db.transaction(async (tx) => {
       const [result] = await tx.update(deliverables).set(body).where(eq(deliverables.id, existing.id)).returning();
+      // Moving a task to another List carries all of its subtasks (any depth) with it.
+      if (body.listId !== undefined && body.listId !== existing.listId) {
+        let frontier = [existing.id];
+        for (let depth = 0; frontier.length > 0 && depth < 20; depth++) {
+          const kids = await tx
+            .select({ id: deliverables.id })
+            .from(deliverables)
+            .where(inArray(deliverables.parentId, frontier));
+          frontier = kids.map((k) => k.id);
+          if (frontier.length > 0) {
+            await tx.update(deliverables).set({ listId: body.listId }).where(inArray(deliverables.id, frontier));
+          }
+        }
+      }
       if (body.stageId && body.stageId !== existing.stageId) {
         await tx.insert(stageTransitions).values({
           deliverableId: existing.id,
@@ -853,7 +976,10 @@ deliverablesRouter.post(
   }),
 );
 
-const checklistItemSchema = z.object({ label: z.string().min(1).max(300) });
+const checklistItemSchema = z.object({
+  label: z.string().min(1).max(300),
+  checklistId: z.string().uuid().optional(),
+});
 
 deliverablesRouter.post(
   "/:id/checklist-items",
@@ -871,10 +997,18 @@ deliverablesRouter.post(
     }
 
     const body = checklistItemSchema.parse(req.body);
+    if (body.checklistId) {
+      const [owner] = await db
+        .select({ id: checklists.id })
+        .from(checklists)
+        .where(and(eq(checklists.id, body.checklistId), eq(checklists.deliverableId, req.params.id)))
+        .limit(1);
+      if (!owner) throw new NotFoundError("Checklist not found");
+    }
     const existingCount = await db.select({ id: checklistItems.id }).from(checklistItems).where(eq(checklistItems.deliverableId, req.params.id));
     const [item] = await db
       .insert(checklistItems)
-      .values({ deliverableId: req.params.id, label: body.label, order: existingCount.length })
+      .values({ deliverableId: req.params.id, checklistId: body.checklistId, label: body.label, order: existingCount.length })
       .returning();
     return res.status(201).json({ checklistItem: item });
   }),
@@ -965,5 +1099,56 @@ deliverablesRouter.get(
       orderBy: (t, { asc: ascOp }) => [ascOp(t.createdAt)],
     });
     return res.json({ comments: rows });
+  }),
+);
+
+/** Shared guard: the caller may edit this task (same rules as PATCH /:id). */
+async function assertCanEditById(actor: ActorScope, deliverableId: string) {
+  const result = await getDeliverableClientId(deliverableId);
+  if (!result.found) throw new NotFoundError("Deliverable not found");
+  if (result.clientId === null) {
+    if (!canActOnStandalone(actor, "edit", deliverableId)) throw new ForbiddenError("You cannot edit this deliverable");
+  } else {
+    policy.assertCanEditDeliverable(actor, { clientId: result.clientId, deliverableId });
+  }
+}
+
+// Named checklists (e.g. "QA") on a task or subtask
+deliverablesRouter.post(
+  "/:id/checklists",
+  asyncRoute(async (req, res) => {
+    const actor = requireActor(req);
+    await assertCanEditById(actor, req.params.id);
+    const body = z.object({ name: z.string().trim().min(1).max(120) }).parse(req.body);
+    const existing = await db.select({ id: checklists.id }).from(checklists).where(eq(checklists.deliverableId, req.params.id));
+    const [checklist] = await db
+      .insert(checklists)
+      .values({ deliverableId: req.params.id, name: body.name, order: existing.length })
+      .returning();
+    return res.status(201).json({ checklist });
+  }),
+);
+
+deliverablesRouter.delete(
+  "/checklists/:checklistId",
+  asyncRoute(async (req, res) => {
+    const actor = requireActor(req);
+    const [row] = await db.select().from(checklists).where(eq(checklists.id, req.params.checklistId)).limit(1);
+    if (!row) throw new NotFoundError("Checklist not found");
+    await assertCanEditById(actor, row.deliverableId);
+    await db.delete(checklists).where(eq(checklists.id, row.id));
+    return res.status(204).send();
+  }),
+);
+
+deliverablesRouter.delete(
+  "/checklist-items/:itemId",
+  asyncRoute(async (req, res) => {
+    const actor = requireActor(req);
+    const [item] = await db.select().from(checklistItems).where(eq(checklistItems.id, req.params.itemId)).limit(1);
+    if (!item) throw new NotFoundError("Checklist item not found");
+    await assertCanEditById(actor, item.deliverableId);
+    await db.delete(checklistItems).where(eq(checklistItems.id, item.id));
+    return res.status(204).send();
   }),
 );

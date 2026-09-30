@@ -9,6 +9,7 @@ import { deliverablesRouter } from "./routes/deliverables";
 import { reportsRouter } from "./routes/reports";
 import { stagesRouter } from "./routes/stages";
 import { assetsRouter } from "./routes/assets";
+import { spacesRouter, foldersRouter, listsRouter } from "./routes/hierarchy";
 import { notificationsRouter } from "./routes/notifications";
 import { errorHandler, asyncRoute } from "./middleware/errorHandler";
 
@@ -32,6 +33,9 @@ app.set("trust proxy", 1);
   app.use("/clients", clientsRouter);
   app.use("/content-items", contentItemsRouter);
   app.use("/deliverables", deliverablesRouter);
+  app.use("/spaces", spacesRouter);
+  app.use("/folders", foldersRouter);
+  app.use("/lists", listsRouter);
   app.use("/reports", reportsRouter);
   app.use("/stages", stagesRouter);
   app.use("/", assetsRouter);

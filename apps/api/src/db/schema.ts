@@ -502,6 +502,61 @@ export const stages = pgTable(
   }),
 );
 
+/**
+ * ClickUp-style hierarchy: Workspace > Space > Folder (optional) > List > Task > Subtask.
+ * Tasks are the existing `deliverables` rows; `list_id` places a task in a List and
+ * `parent_id` (already present) makes it a subtask of another task, to any depth.
+ */
+export const spaces = pgTable(
+  "spaces",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    color: text("color"),
+    order: integer("order").notNull().default(0),
+    archived: boolean("archived").notNull().default(false),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({ workspaceIdx: index("spaces_workspace_idx").on(t.workspaceId) }),
+);
+
+export const folders = pgTable(
+  "folders",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    spaceId: uuid("space_id").notNull().references(() => spaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    order: integer("order").notNull().default(0),
+    archived: boolean("archived").notNull().default(false),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({ spaceIdx: index("folders_space_idx").on(t.spaceId) }),
+);
+
+export const lists = pgTable(
+  "lists",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    spaceId: uuid("space_id").notNull().references(() => spaces.id, { onDelete: "cascade" }),
+    // null = the List sits directly in the Space (no Folder)
+    folderId: uuid("folder_id").references(() => folders.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    order: integer("order").notNull().default(0),
+    archived: boolean("archived").notNull().default(false),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    spaceIdx: index("lists_space_idx").on(t.spaceId),
+    folderIdx: index("lists_folder_idx").on(t.folderId),
+  }),
+);
+
 export const contentItems = pgTable(
   "content_items",
   {
@@ -530,6 +585,8 @@ export const deliverables = pgTable(
     contentItemId: uuid("content_item_id").references(() => contentItems.id, { onDelete: "set null" }),
     // Direct link to a client, so a task can belong to a client without a calendar content item.
     clientId: uuid("client_id").references(() => clients.id, { onDelete: "set null" }),
+    // Which List this task lives in (null = not filed in the hierarchy yet; still shows in Everything).
+    listId: uuid("list_id").references(() => lists.id, { onDelete: "set null" }),
     title: text("title").notNull(),
     description: text("description"),
     dueDate: timestamp("due_date"),
@@ -545,6 +602,8 @@ export const deliverables = pgTable(
     stageIdx: index("deliverables_workspace_stage_idx").on(t.workspaceId, t.stageId),
     dueIdx: index("deliverables_workspace_due_idx").on(t.workspaceId, t.dueDate),
     clientIdx: index("deliverables_client_idx").on(t.clientId),
+    listIdx: index("deliverables_list_idx").on(t.listId),
+    parentIdx: index("deliverables_parent_idx").on(t.parentId),
   }),
 );
 
@@ -560,11 +619,25 @@ export const deliverableAssignees = pgTable(
   }),
 );
 
+export const checklists = pgTable(
+  "checklists",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    deliverableId: uuid("deliverable_id").notNull().references(() => deliverables.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    order: integer("order").notNull().default(0),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => ({ idx: index("checklists_deliverable_idx").on(t.deliverableId) }),
+);
+
 export const checklistItems = pgTable(
   "checklist_items",
   {
     id: uuid("id").defaultRandom().primaryKey(),
     deliverableId: uuid("deliverable_id").notNull().references(() => deliverables.id, { onDelete: "cascade" }),
+    // null = legacy ungrouped item (created before named checklists existed)
+    checklistId: uuid("checklist_id").references(() => checklists.id, { onDelete: "cascade" }),
     label: text("label").notNull(),
     done: boolean("done").notNull().default(false),
     order: integer("order").notNull().default(0),
@@ -702,7 +775,30 @@ export const contentItemsRelations = relations(contentItems, ({ one, many }) => 
   deliverables: many(deliverables),
 }));
 
+export const spacesRelations = relations(spaces, ({ many }) => ({
+  folders: many(folders),
+  lists: many(lists),
+}));
+
+export const foldersRelations = relations(folders, ({ one, many }) => ({
+  space: one(spaces, { fields: [folders.spaceId], references: [spaces.id] }),
+  lists: many(lists),
+}));
+
+export const listsRelations = relations(lists, ({ one, many }) => ({
+  space: one(spaces, { fields: [lists.spaceId], references: [spaces.id] }),
+  folder: one(folders, { fields: [lists.folderId], references: [folders.id] }),
+  deliverables: many(deliverables),
+}));
+
+export const checklistsRelations = relations(checklists, ({ one, many }) => ({
+  deliverable: one(deliverables, { fields: [checklists.deliverableId], references: [deliverables.id] }),
+  items: many(checklistItems),
+}));
+
 export const deliverablesRelations = relations(deliverables, ({ one, many }) => ({
+  list: one(lists, { fields: [deliverables.listId], references: [lists.id] }),
+  checklists: many(checklists),
   contentItem: one(contentItems, { fields: [deliverables.contentItemId], references: [contentItems.id] }),
   client: one(clients, { fields: [deliverables.clientId], references: [clients.id] }),
   stage: one(stages, { fields: [deliverables.stageId], references: [stages.id] }),
@@ -726,6 +822,7 @@ export const commentsRelations = relations(comments, ({ one }) => ({
 }));
 
 export const checklistItemsRelations = relations(checklistItems, ({ one }) => ({
+  checklist: one(checklists, { fields: [checklistItems.checklistId], references: [checklists.id] }),
   deliverable: one(deliverables, { fields: [checklistItems.deliverableId], references: [deliverables.id] }),
 }));
 
