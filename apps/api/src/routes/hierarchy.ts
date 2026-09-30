@@ -74,13 +74,39 @@ async function taskCountsByList(actor: ActorScope): Promise<Map<string, number>>
   return map;
 }
 
+/**
+ * List ids this actor may see. null = no restriction (admin / manager).
+ * Team members only see Lists that hold a task assigned to them.
+ */
+async function visibleListIds(actor: ActorScope): Promise<Set<string> | null> {
+  if (actor.role !== "team_member") return null;
+  const rows = await db
+    .select({ listId: deliverables.listId })
+    .from(deliverableAssignees)
+    .innerJoin(deliverables, eq(deliverables.id, deliverableAssignees.deliverableId))
+    .where(
+      and(
+        eq(deliverableAssignees.userId, actor.userId),
+        eq(deliverables.workspaceId, actor.workspaceId),
+        isNotNull(deliverables.listId),
+      ),
+    );
+  return new Set(rows.map((r) => r.listId as string));
+}
+
 async function buildTree(actor: ActorScope) {
-  const [spaceRows, folderRows, listRows, counts] = await Promise.all([
+  const [allSpaces, allFolders, allLists, counts, visible] = await Promise.all([
     db.select().from(spaces).where(and(eq(spaces.workspaceId, actor.workspaceId), eq(spaces.archived, false))).orderBy(asc(spaces.order), asc(spaces.createdAt)),
     db.select().from(folders).where(and(eq(folders.workspaceId, actor.workspaceId), eq(folders.archived, false))).orderBy(asc(folders.order), asc(folders.createdAt)),
     db.select().from(lists).where(and(eq(lists.workspaceId, actor.workspaceId), eq(lists.archived, false))).orderBy(asc(lists.order), asc(lists.createdAt)),
     taskCountsByList(actor),
+    visibleListIds(actor),
   ]);
+
+  // Hide Lists (and the Folders / Spaces that only contain hidden Lists) this person has no task in.
+  const listRows = visible ? allLists.filter((l) => visible.has(l.id)) : allLists;
+  const folderRows = visible ? allFolders.filter((f) => listRows.some((l) => l.folderId === f.id)) : allFolders;
+  const spaceRows = visible ? allSpaces.filter((s) => listRows.some((l) => l.spaceId === s.id)) : allSpaces;
 
   const listNode = (l: (typeof listRows)[number]) => ({
     id: l.id,
@@ -106,7 +132,6 @@ async function buildTree(actor: ActorScope) {
     lists: listRows.filter((l) => l.spaceId === s.id && !l.folderId).map(listNode),
   }));
 }
-
 /* ───────────────────────── Spaces ───────────────────────── */
 
 spacesRouter.get(
@@ -269,6 +294,8 @@ listsRouter.get(
     const actor = requireActor(req);
     if (!canViewStructure(actor)) throw new ForbiddenError("You do not have access to this List");
     const list = await assertList(req.params.id, actor.workspaceId);
+        const visible = await visibleListIds(actor);
+    if (visible && !visible.has(list.id)) throw new ForbiddenError("You do not have access to this List");
     const [space] = await db.select({ id: spaces.id, name: spaces.name, color: spaces.color }).from(spaces).where(eq(spaces.id, list.spaceId)).limit(1);
     const folder = list.folderId
       ? (await db.select({ id: folders.id, name: folders.name }).from(folders).where(eq(folders.id, list.folderId)).limit(1))[0] ?? null
