@@ -6,6 +6,7 @@ import { config } from "../lib/config";
 export const pool = new Pool({
   connectionString: config.databaseUrl,
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+  options: "-c timezone=UTC",
 });
 
 export const db = drizzle(pool, { schema });

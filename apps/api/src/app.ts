@@ -11,6 +11,7 @@ import { stagesRouter } from "./routes/stages";
 import { assetsRouter } from "./routes/assets";
 import { spacesRouter, foldersRouter, listsRouter } from "./routes/hierarchy";
 import { notificationsRouter } from "./routes/notifications";
+import { jobsRouter } from "./routes/jobs";
 import { errorHandler, asyncRoute } from "./middleware/errorHandler";
 
 export function createApp() {
@@ -39,6 +40,7 @@ app.set("trust proxy", 1);
   app.use("/reports", reportsRouter);
   app.use("/stages", stagesRouter);
   app.use("/", assetsRouter);
+  app.use("/jobs", jobsRouter);
   app.use("/notifications", notificationsRouter);
 
   app.use(errorHandler);
